@@ -282,8 +282,12 @@ function createFallbackStream(
     const fallbackList = chains[chainName];
 
     if (!fallbackList || fallbackList.length === 0) {
-      console.error(`[Fallback] No fallback chain found for: ${chainName}`);
-      stream.push({ type: "error", reason: "error", error: createErrorMessage(model, new Error(`Unknown chain: ${chainName}`), chainName) });
+      const availableChains = Object.keys(chains);
+      const guidance = availableChains.length > 0
+        ? ` Available chains: ${availableChains.join(", ")}`
+        : ` No chains defined in config. Check ${CONFIG_PATH} to add fallback chains.`;
+      console.error(`[Fallback] Unknown chain "${chainName}".${guidance}`);
+      stream.push({ type: "error", reason: "error", error: createErrorMessage(model, new Error(`Unknown chain "${chainName}".${guidance}`), chainName) });
       stream.end();
       return stream;
     }

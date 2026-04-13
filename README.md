@@ -26,12 +26,15 @@ Create a config file at `~/.pi/fallback-chains.json`:
 ```json
 {
   "reviewer": [
-    "google/gemini-3.1-pro-preview",
-    "google/gemini-2.5-pro"
+    "zai/glm-5.1"
   ],
   "worker": [
-    "google/gemini-3-flash-preview",
-    "google/gemini-2.5-flash"
+    "minimax/MiniMax-M2.7"
+  ],
+  "planner": [
+    "google/gemini-3.1-pro-preview",
+    "google-antigravity/gemini-3.1-pro-high",
+    "google-antigravity/claude-opus-4-6-thinking"
   ]
 }
 ```

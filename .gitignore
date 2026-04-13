@@ -24,4 +24,5 @@ yarn-error.log*
 .taskplane-tasks/
 
 # Pi project-local packages (if using pi install -l)
-.pi/npm/
+.pi
+.pi-lens
