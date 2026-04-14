@@ -182,7 +182,7 @@ function isRetryableError(errorMessage: string): { retryable: boolean; delayMs?:
 /** Parse provider/model string */
 function parseModelString(modelString: string): { provider: string; modelId: string } | null {
   const parts = modelString.split("/");
-  if (parts.length < 2) return null;
+  if (parts.length < 2 || !parts[0]) return null;
   return {
     provider: parts[0],
     modelId: parts.slice(1).join("/"),
@@ -372,68 +372,68 @@ function createFallbackStream(
               console.log(`[Fallback] Attempting: ${targetModelString} (${attempt + 1}/${modelOrder.length})`);
             }
 
-            // Buffer events
-            const eventBuffer: Parameters<typeof stream.push>[0][] = [];
             const sourceStream = streamSimple(targetModel, context, { ...options, apiKey: authResult.apiKey, headers: authResult.headers });
 
             let shouldFallback = false;
-            let retryableErrorOccurred = false;
             let errorDelayMs: number | undefined;
+            let hasEmitted = false;
 
             for await (const event of sourceStream) {
-              if (event.type === "error") {
+              if (event.type === "error" && !hasEmitted) {
                 const errorStr = event.error?.errorMessage || "";
+                console.warn(`[Fallback] ${targetModelString} failed: ${errorStr}`);
+                lastError = new Error(errorStr);
+                
                 const { retryable, delayMs } = isRetryableError(errorStr);
-
                 if (retryable) {
-                  console.warn(`[Fallback] ${targetModelString} failed (retryable)`);
-                  lastError = new Error(errorStr);
                   shouldFallback = true;
-                  retryableErrorOccurred = true;
                   errorDelayMs = delayMs;
-
-                  // Record failure
                   onFailure(targetModelString, delayMs);
-                  break;
+                } else {
+                  // Break retry loop on non-retryable error to try next model
+                  shouldFallback = false;
                 }
+                break;
               }
-              eventBuffer.push(event);
+              
+              if (!hasEmitted && event.type !== "error") {
+                // First successful event, committed to this model
+                hasEmitted = true;
+                console.log(`[Fallback] ${targetModelString} succeeded`);
+                onSuccess(chainName, targetModelString, originalIndex);
+              }
+              
+              stream.push(event);
+              
+              if (event.type === "error" && hasEmitted) {
+                stream.end();
+                return;
+              }
             }
 
             if (shouldFallback) {
-              eventBuffer.length = 0;
-
-              // If server provided a delay, use it; otherwise use exponential backoff
               const waitDelay = errorDelayMs || currentDelayMs;
-
-              // Record this retry attempt
               retryCount++;
 
-              // Check if we should continue retrying
               if (retryCount < MAX_RETRIES_PER_MODEL) {
                 console.log(`[Fallback] Retrying ${targetModelString} in ${waitDelay}ms (attempt ${retryCount + 1}/${MAX_RETRIES_PER_MODEL})`);
                 await sleep(waitDelay);
-
-                // Exponential backoff: double the delay, cap at MAX_RETRY_DELAY_MS
                 currentDelayMs = Math.min(currentDelayMs * 2, MAX_RETRY_DELAY_MS);
+                continue;
               } else {
                 console.warn(`[Fallback] Max retries (${MAX_RETRIES_PER_MODEL}) reached for ${targetModelString}, falling back`);
+                break; // Break retry loop to try next model
               }
-              continue;
             }
 
-            // Success!
-            console.log(`[Fallback] ${targetModelString} succeeded`);
-
-            // Update cache with this working model
-            onSuccess(chainName, targetModelString, originalIndex);
-
-            // Emit buffered events
-            for (const event of eventBuffer) {
-              stream.push(event);
+            if (hasEmitted) {
+              stream.end();
+              return;
+            } else {
+              // Errored on first event, but not retryable
+              // Break inner retry loop to try next model
+              break;
             }
-            stream.end();
-            return;
 
           } catch (error) {
             const errorStr = error instanceof Error ? error.message : String(error);

@@ -14,7 +14,7 @@ describe("Fallback Provider Extension - Unit Tests", () => {
   describe("parseModelString", () => {
     const parseModelString = (modelString: string): { provider: string; modelId: string } | null => {
       const parts = modelString.split("/");
-      if (parts.length < 2) return null;
+      if (parts.length < 2 || !parts[0]) return null;
       return {
         provider: parts[0],
         modelId: parts.slice(1).join("/"),
@@ -40,9 +40,8 @@ describe("Fallback Provider Extension - Unit Tests", () => {
     it("should return null for invalid format", () => {
       expect(parseModelString("no-slash")).toBeNull();
       expect(parseModelString("")).toBeNull();
-      // Implementation returns { provider: "", modelId: "..." } for leading slash
-      // This edge case could be tightened in future
-      expect(parseModelString("/starts-with-slash")).toEqual({ provider: "", modelId: "starts-with-slash" });
+      // Leading slash is invalid
+      expect(parseModelString("/starts-with-slash")).toBeNull();
     });
   });
 
