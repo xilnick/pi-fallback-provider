@@ -200,8 +200,7 @@ function createFallbackStream(chains, getModelRegistry, cache, failedModels, onS
         const chainName = model.id;
         // Only process if this is a known fallback chain, otherwise let other providers handle it
         if (!chains[chainName]) {
-            console.error(`[Fallback] Model "${chainName}" is not a fallback chain. Available: ${Object.keys(chains).join(", ")}`);
-            stream.push({ type: "error", reason: "error", error: createErrorMessage(model, new Error(`"${chainName}" is not a fallback chain`), chainName) });
+            // This is not a fallback chain - signal to pi that we can't handle it by ending stream immediately
             stream.end();
             return stream;
         }
