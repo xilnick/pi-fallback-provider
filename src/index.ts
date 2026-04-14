@@ -154,29 +154,9 @@ function extractRetryDelay(error: ProviderError): number | null {
 
 /** Check if an error is retryable */
 function isRetryableError(errorMessage: string): { retryable: boolean; delayMs?: number } {
-  const parsed = parseProviderError(errorMessage);
-  
-  if (parsed) {
-    if (parsed.code === 429 || parsed.code === 529) {
-      const delay = extractRetryDelay(parsed);
-      return { retryable: true, delayMs: delay ?? undefined };
-    }
-    
-    const retryableStatuses = ["RESOURCE_EXHAUSTED", "OVERLOADED", "UNAVAILABLE", "DEADLINE_EXCEEDED"];
-    if (parsed.status && retryableStatuses.includes(parsed.status)) {
-      const delay = extractRetryDelay(parsed);
-      return { retryable: true, delayMs: delay ?? undefined };
-    }
-  }
-  
-  const message = errorMessage.toLowerCase();
-  const retryablePatterns = [
-    "rate limit", "overloaded", "too many requests", "fetch failed",
-    "network error", "connection refused", "timeout",
-    "temporarily unavailable", "service unavailable", "429", "529", "resource_exhausted",
-  ];
-  
-  return { retryable: retryablePatterns.some((p) => message.includes(p)) };
+  // To ensure the 10 retries in 10 seconds requirement is met for all unexpected provider failures,
+  // we consider all streaming errors as retryable. Pre-flight checks (auth, model exists) are handled elsewhere.
+  return { retryable: true, delayMs: undefined };
 }
 
 /** Parse provider/model string */
@@ -220,53 +200,8 @@ function getModelOrder(
   failedModels: Map<string, FailedModel>
 ): { models: string[]; startIndex: number; usedCache: boolean } {
   
-  const now = Date.now();
-  
-  // Check if cache is valid
-  if (cache && cache.workingModel && now - cache.timestamp < CACHE_TTL_MS) {
-    const cachedIndex = fallbackList.indexOf(cache.workingModel);
-    if (cachedIndex !== -1) {
-      console.log(`[Fallback] Using cached working model: ${cache.workingModel}`);
-      
-      // Build order: cached model, then subsequent models (skipping failed ones)
-      const ordered: string[] = [cache.workingModel];
-      
-      // Add subsequent models that aren't failed
-      for (let i = cachedIndex + 1; i < fallbackList.length; i++) {
-        const model = fallbackList[i];
-        const failed = failedModels.get(model);
-        if (!failed || now - failed.failedAt > FAILED_COOLDOWN_MS) {
-          ordered.push(model);
-        } else {
-          console.log(`[Fallback] Skipping ${model} (failed ${Math.round((now - failed.failedAt) / 1000)}s ago)`);
-        }
-      }
-      
-      // Add earlier models that aren't failed (wrap around)
-      for (let i = 0; i < cachedIndex; i++) {
-        const model = fallbackList[i];
-        const failed = failedModels.get(model);
-        if (!failed || now - failed.failedAt > FAILED_COOLDOWN_MS) {
-          ordered.push(model);
-        }
-      }
-      
-      return { models: ordered, startIndex: 0, usedCache: true };
-    }
-  }
-  
-  // No valid cache, try in chain order skipping failed models
-  console.log(`[Fallback] No valid cache, starting from beginning`);
-  const ordered: string[] = [];
-  
-  for (const model of fallbackList) {
-    const failed = failedModels.get(model);
-    if (!failed || now - failed.failedAt > FAILED_COOLDOWN_MS) {
-      ordered.push(model);
-    } else {
-      console.log(`[Fallback] Skipping ${model} (failed ${Math.round((now - failed.failedAt) / 1000)}s ago)`);
-    }
-  }
+  console.log(`[Fallback] Selecting by priority, starting from beginning`);
+  const ordered: string[] = [...fallbackList];
   
   return { models: ordered, startIndex: 0, usedCache: false };
 }
