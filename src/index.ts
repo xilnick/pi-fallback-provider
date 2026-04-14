@@ -69,6 +69,15 @@ const CACHE_TTL_MS = 60 * 60 * 1000;
 /** Failed model cooldown: 5 minutes */
 const FAILED_COOLDOWN_MS = 5 * 60 * 1000;
 
+/** Max retries per model on retryable errors */
+const MAX_RETRIES_PER_MODEL = 10;
+
+/** Initial retry delay (ms) */
+const INITIAL_RETRY_DELAY_MS = 1000;
+
+/** Max retry delay cap (ms) */
+const MAX_RETRY_DELAY_MS = 60000;
+
 /** Load fallback chains from config file */
 function loadFallbackChains(): FallbackChain {
   try {
@@ -279,15 +288,20 @@ function createFallbackStream(
   ): AssistantMessageEventStream {
     const stream = createAssistantMessageEventStream();
     const chainName = model.id;
+    
+    // Only process if this is a known fallback chain, otherwise let other providers handle it
+    if (!chains[chainName]) {
+      console.error(`[Fallback] Model "${chainName}" is not a fallback chain. Available: ${Object.keys(chains).join(", ")}`);
+      stream.push({ type: "error", reason: "error", error: createErrorMessage(model, new Error(`"${chainName}" is not a fallback chain`), chainName) });
+      stream.end();
+      return stream;
+    }
+    
     const fallbackList = chains[chainName];
 
     if (!fallbackList || fallbackList.length === 0) {
-      const availableChains = Object.keys(chains);
-      const guidance = availableChains.length > 0
-        ? ` Available chains: ${availableChains.join(", ")}`
-        : ` No chains defined in config. Check ${CONFIG_PATH} to add fallback chains.`;
-      console.error(`[Fallback] Unknown chain "${chainName}".${guidance}`);
-      stream.push({ type: "error", reason: "error", error: createErrorMessage(model, new Error(`Unknown chain "${chainName}".${guidance}`), chainName) });
+      console.error(`[Fallback] Chain "${chainName}" is empty`);
+      stream.push({ type: "error", reason: "error", error: createErrorMessage(model, new Error(`Chain "${chainName}" is empty`), chainName) });
       stream.end();
       return stream;
     }
@@ -331,90 +345,129 @@ function createFallbackStream(
           break;
         }
 
-        try {
-          const targetModel = modelRegistry.find(providerName, targetModelId);
-          if (!targetModel) {
-            console.warn(`[Fallback] Model not found: ${targetModelString}`);
-            lastError = new Error(`Model not found: ${targetModelString}`);
-            continue;
-          }
+        // Retry loop for this model
+        let retryCount = 0;
+        let currentDelayMs = INITIAL_RETRY_DELAY_MS;
+        let modelSucceeded = false;
 
-          const authResult = await modelRegistry.getApiKeyAndHeaders(targetModel);
-          if (!authResult.ok || !authResult.apiKey) {
-            const errMsg = "error" in authResult ? authResult.error : "Authentication failed";
-            console.warn(`[Fallback] No API key for ${targetModelString}: ${errMsg}`);
-            lastError = new Error(errMsg);
-            continue;
-          }
+        while (retryCount < MAX_RETRIES_PER_MODEL && !modelSucceeded) {
+          try {
+            const targetModel = modelRegistry.find(providerName, targetModelId);
+            if (!targetModel) {
+              console.warn(`[Fallback] Model not found: ${targetModelString}`);
+              lastError = new Error(`Model not found: ${targetModelString}`);
+              break; // Don't retry if model doesn't exist
+            }
 
-          console.log(`[Fallback] Attempting: ${targetModelString} (${attempt + 1}/${modelOrder.length})`);
+            const authResult = await modelRegistry.getApiKeyAndHeaders(targetModel);
+            if (!authResult.ok || !authResult.apiKey) {
+              const errMsg = "error" in authResult ? authResult.error : "Authentication failed";
+              console.warn(`[Fallback] No API key for ${targetModelString}: ${errMsg}`);
+              lastError = new Error(errMsg);
+              break; // Don't retry auth failures
+            }
 
-          // Buffer events
-          const eventBuffer: Parameters<typeof stream.push>[0][] = [];
-          const sourceStream = streamSimple(targetModel, context, { ...options, apiKey: authResult.apiKey, headers: authResult.headers });
+            if (retryCount > 0) {
+              console.log(`[Fallback] Retry ${retryCount}/${MAX_RETRIES_PER_MODEL} for ${targetModelString} after ${currentDelayMs}ms backoff`);
+            } else {
+              console.log(`[Fallback] Attempting: ${targetModelString} (${attempt + 1}/${modelOrder.length})`);
+            }
 
-          let shouldFallback = false;
-          
-          for await (const event of sourceStream) {
-            if (event.type === "error") {
-              const errorStr = event.error?.errorMessage || "";
-              const { retryable, delayMs } = isRetryableError(errorStr);
-              
-              if (retryable) {
-                console.warn(`[Fallback] ${targetModelString} failed (retryable)`);
-                lastError = new Error(errorStr);
-                shouldFallback = true;
-                
-                // Record failure
-                onFailure(targetModelString, delayMs);
-                
-                // If this was the cached model, clear the cache
-                if (usedCache && attempt === 0) {
-                  console.log(`[Fallback] Cached model failed, will try alternatives`);
+            // Buffer events
+            const eventBuffer: Parameters<typeof stream.push>[0][] = [];
+            const sourceStream = streamSimple(targetModel, context, { ...options, apiKey: authResult.apiKey, headers: authResult.headers });
+
+            let shouldFallback = false;
+            let retryableErrorOccurred = false;
+            let errorDelayMs: number | undefined;
+
+            for await (const event of sourceStream) {
+              if (event.type === "error") {
+                const errorStr = event.error?.errorMessage || "";
+                const { retryable, delayMs } = isRetryableError(errorStr);
+
+                if (retryable) {
+                  console.warn(`[Fallback] ${targetModelString} failed (retryable)`);
+                  lastError = new Error(errorStr);
+                  shouldFallback = true;
+                  retryableErrorOccurred = true;
+                  errorDelayMs = delayMs;
+
+                  // Record failure
+                  onFailure(targetModelString, delayMs);
+                  break;
                 }
-                
-                // Wait if there's a retry delay
-                if (delayMs && attempt < modelOrder.length - 1) {
-                  console.log(`[Fallback] Waiting ${delayMs}ms...`);
-                  await sleep(delayMs);
-                }
-                break;
               }
+              eventBuffer.push(event);
             }
-            eventBuffer.push(event);
-          }
 
-          if (shouldFallback) {
-            eventBuffer.length = 0;
-            continue;
-          }
+            if (shouldFallback) {
+              eventBuffer.length = 0;
 
-          // Success!
-          console.log(`[Fallback] ${targetModelString} succeeded`);
-          
-          // Update cache with this working model
-          onSuccess(chainName, targetModelString, originalIndex);
-          
-          // Emit buffered events
-          for (const event of eventBuffer) {
-            stream.push(event);
-          }
-          stream.end();
-          return;
+              // If server provided a delay, use it; otherwise use exponential backoff
+              const waitDelay = errorDelayMs || currentDelayMs;
 
-        } catch (error) {
-          const errorStr = error instanceof Error ? error.message : String(error);
-          const { retryable, delayMs } = isRetryableError(errorStr);
-          
-          console.warn(`[Fallback] ${targetModelString} failed: ${errorStr}`);
-          lastError = error instanceof Error ? error : new Error(errorStr);
-          
-          if (retryable) {
-            onFailure(targetModelString, delayMs);
-            if (delayMs && attempt < modelOrder.length - 1) {
-              await sleep(delayMs);
+              // Record this retry attempt
+              retryCount++;
+
+              // Check if we should continue retrying
+              if (retryCount < MAX_RETRIES_PER_MODEL) {
+                console.log(`[Fallback] Retrying ${targetModelString} in ${waitDelay}ms (attempt ${retryCount + 1}/${MAX_RETRIES_PER_MODEL})`);
+                await sleep(waitDelay);
+
+                // Exponential backoff: double the delay, cap at MAX_RETRY_DELAY_MS
+                currentDelayMs = Math.min(currentDelayMs * 2, MAX_RETRY_DELAY_MS);
+              } else {
+                console.warn(`[Fallback] Max retries (${MAX_RETRIES_PER_MODEL}) reached for ${targetModelString}, falling back`);
+              }
+              continue;
+            }
+
+            // Success!
+            console.log(`[Fallback] ${targetModelString} succeeded`);
+
+            // Update cache with this working model
+            onSuccess(chainName, targetModelString, originalIndex);
+
+            // Emit buffered events
+            for (const event of eventBuffer) {
+              stream.push(event);
+            }
+            stream.end();
+            return;
+
+          } catch (error) {
+            const errorStr = error instanceof Error ? error.message : String(error);
+            const { retryable, delayMs } = isRetryableError(errorStr);
+
+            console.warn(`[Fallback] ${targetModelString} failed: ${errorStr}`);
+            lastError = error instanceof Error ? error : new Error(errorStr);
+
+            if (retryable) {
+              onFailure(targetModelString, delayMs);
+
+              const waitDelay = delayMs || currentDelayMs;
+              retryCount++;
+
+              if (retryCount < MAX_RETRIES_PER_MODEL) {
+                console.log(`[Fallback] Retrying ${targetModelString} after error in ${waitDelay}ms (attempt ${retryCount + 1}/${MAX_RETRIES_PER_MODEL})`);
+                await sleep(waitDelay);
+                currentDelayMs = Math.min(currentDelayMs * 2, MAX_RETRY_DELAY_MS);
+              } else {
+                console.warn(`[Fallback] Max retries (${MAX_RETRIES_PER_MODEL}) reached for ${targetModelString}`);
+              }
+            } else {
+              // Non-retryable error, break out of retry loop
+              break;
             }
           }
+        }
+
+        // If model succeeded, we would have returned above
+        // If we get here, either the model doesn't exist, auth failed, or we exhausted retries
+        if (retryCount > 0 && retryCount >= MAX_RETRIES_PER_MODEL) {
+          // We exhausted retries, continue to next model in chain
+          console.log(`[Fallback] Moving to next model after exhausting ${MAX_RETRIES_PER_MODEL} retries`);
         }
       }
 
