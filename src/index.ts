@@ -63,6 +63,16 @@ interface FailedModel {
 /** Path to fallback chains config */
 const CONFIG_PATH = `${process.env.HOME || process.env.USERPROFILE || "~"}/.pi/fallback-chains.json`;
 
+/** Debug logging enabled when PI_EXTENSION_DEBUG env var is set */
+const DEBUG = process.env.PI_EXTENSION_DEBUG === "true" || process.env.PI_EXTENSION_DEBUG === "1";
+
+/** Conditional logger - only outputs when PI_EXTENSION_DEBUG is set */
+const log = {
+  debug: (...args: unknown[]) => DEBUG && console.log(...args),
+  warn: (...args: unknown[]) => DEBUG && console.warn(...args),
+  error: (...args: unknown[]) => DEBUG && console.error(...args),
+};
+
 /** Cache TTL: 1 hour in milliseconds */
 const CACHE_TTL_MS = 60 * 60 * 1000;
 
@@ -82,7 +92,7 @@ const MAX_RETRY_DELAY_MS = 1000;
 function loadFallbackChains(): FallbackChain {
   try {
     if (!fs.existsSync(CONFIG_PATH)) {
-      console.warn(`[Fallback] Config not found at ${CONFIG_PATH}`);
+      log.warn(`[Fallback] Config not found at ${CONFIG_PATH}`);
       return {};
     }
     
@@ -90,18 +100,18 @@ function loadFallbackChains(): FallbackChain {
     const config = JSON.parse(content);
     
     if (typeof config !== "object" || config === null || Array.isArray(config)) {
-      console.error("[Fallback] Config must be a JSON object");
+      log.error("[Fallback] Config must be a JSON object");
       return {};
     }
     
     const chains: FallbackChain = {};
     for (const [chainName, chain] of Object.entries(config)) {
       if (!Array.isArray(chain)) {
-        console.warn(`[Fallback] Chain "${chainName}" must be an array, skipping`);
+        log.warn(`[Fallback] Chain "${chainName}" must be an array, skipping`);
         continue;
       }
       if (chain.length === 0) {
-        console.warn(`[Fallback] Chain "${chainName}" is empty, skipping`);
+        log.warn(`[Fallback] Chain "${chainName}" is empty, skipping`);
         continue;
       }
       chains[chainName] = chain.filter((m): m is string => typeof m === "string" && m.includes("/"));
@@ -109,7 +119,7 @@ function loadFallbackChains(): FallbackChain {
     
     return chains;
   } catch (error) {
-    console.error(`[Fallback] Failed to load config from ${CONFIG_PATH}:`, error);
+    log.error(`[Fallback] Failed to load config from ${CONFIG_PATH}:`, error);
     return {};
   }
 }
@@ -221,7 +231,7 @@ function getModelOrder(
   failedModels: Map<string, FailedModel>
 ): { models: string[]; startIndex: number; usedCache: boolean } {
   
-  console.log(`[Fallback] Selecting by priority, starting from beginning`);
+  log.debug(`[Fallback] Selecting by priority, starting from beginning`);
   const ordered: string[] = [...fallbackList];
   
   return { models: ordered, startIndex: 0, usedCache: false };
@@ -242,7 +252,7 @@ function createFallbackStream(
     context: Context,
     options?: SimpleStreamOptions
   ): AssistantMessageEventStream {
-    console.error(`[Fallback DEBUG] fallbackStream invoked for model: ${model.id}`);
+    log.debug(`[Fallback DEBUG] fallbackStream invoked for model: ${model.id}`);
     const stream = createAssistantMessageEventStream();
     const chainName = model.id;
     
@@ -256,14 +266,14 @@ function createFallbackStream(
     const fallbackList = chains[chainName];
 
     if (!fallbackList || fallbackList.length === 0) {
-      console.error(`[Fallback] Chain "${chainName}" is empty`);
+      log.error(`[Fallback] Chain "${chainName}" is empty`);
       stream.push({ type: "error", reason: "error", error: createErrorMessage(model, new Error(`Chain "${chainName}" is empty`), chainName) });
       stream.end();
       return stream;
     }
 
-    console.log(`[Fallback] Processing request for chain: ${chainName}`);
-    console.log(`[Fallback] Chain: ${fallbackList.join(" -> ")}`);
+    log.debug(`[Fallback] Processing request for chain: ${chainName}`);
+    log.debug(`[Fallback] Chain: ${fallbackList.join(" -> ")}`);
 
     (async () => {
       const chainCache = cache.get(chainName) || null;
@@ -272,13 +282,13 @@ function createFallbackStream(
       const { models: modelOrder, usedCache } = getModelOrder(chainName, fallbackList, chainCache, failedModels);
       
       if (modelOrder.length === 0) {
-        console.error(`[Fallback] All models in chain '${chainName}' are temporarily unavailable`);
+        log.error(`[Fallback] All models in chain '${chainName}' are temporarily unavailable`);
         stream.push({ type: "error", reason: "error", error: createErrorMessage(model, new Error("All models temporarily unavailable"), chainName) });
         stream.end();
         return;
       }
       
-      console.log(`[Fallback] Model order: ${modelOrder.join(" -> ")}`);
+      log.debug(`[Fallback] Model order: ${modelOrder.join(" -> ")}`);
 
       let lastError: Error | null = null;
 
@@ -296,7 +306,7 @@ function createFallbackStream(
 
         const modelRegistry = getModelRegistry();
         if (!modelRegistry) {
-          console.error(`[Fallback] Model registry not available`);
+          log.error(`[Fallback] Model registry not available`);
           lastError = new Error("Model registry not available");
           break;
         }
@@ -311,7 +321,7 @@ function createFallbackStream(
           try {
             const targetModel = modelRegistry.find(providerName, targetModelId);
             if (!targetModel) {
-              console.warn(`[Fallback] Model not found: ${targetModelString}`);
+              log.warn(`[Fallback] Model not found: ${targetModelString}`);
               lastError = new Error(`Model not found: ${targetModelString}`);
               break; // Don't retry if model doesn't exist
             }
@@ -319,22 +329,22 @@ function createFallbackStream(
             const authResult = await modelRegistry.getApiKeyAndHeaders(targetModel);
             if (!authResult.ok || !authResult.apiKey) {
               const errMsg = "error" in authResult ? authResult.error : "Authentication failed";
-              console.warn(`[Fallback] No API key for ${targetModelString}: ${errMsg}`);
+              log.warn(`[Fallback] No API key for ${targetModelString}: ${errMsg}`);
               lastError = new Error(errMsg);
               break; // Don't retry auth failures
             }
 
             if (retryCount > 0) {
-              console.log(`[Fallback] Retry ${retryCount}/${MAX_RETRIES_PER_MODEL} for ${targetModelString} after ${currentDelayMs}ms backoff`);
+              log.debug(`[Fallback] Retry ${retryCount}/${MAX_RETRIES_PER_MODEL} for ${targetModelString} after ${currentDelayMs}ms backoff`);
             } else {
-              console.log(`[Fallback] Attempting: ${targetModelString} (${attempt + 1}/${modelOrder.length})`);
-              console.log(`[Fallback DEBUG] Target Base URL: ${targetModel.baseUrl || "default"}`);
-              console.log(`[Fallback DEBUG] Context Messages: ${context.messages.length}`);
+              log.debug(`[Fallback] Attempting: ${targetModelString} (${attempt + 1}/${modelOrder.length})`);
+              log.debug(`[Fallback DEBUG] Target Base URL: ${targetModel.baseUrl || "default"}`);
+              log.debug(`[Fallback DEBUG] Context Messages: ${context.messages.length}`);
             }
 
             const abortController = new AbortController();
             timeoutId = setTimeout(() => {
-              console.warn(`[Fallback DEBUG] ${targetModelString} connection timed out after 10s`);
+              log.warn(`[Fallback DEBUG] ${targetModelString} connection timed out after 10s`);
               abortController.abort(new Error("Connection timed out after 10 seconds"));
             }, 10000);
 
@@ -362,9 +372,9 @@ function createFallbackStream(
               if (event.type === "error" && !hasEmitted) {
                 if (timeoutId) clearTimeout(timeoutId);
                 const errorStr = event.error?.errorMessage || JSON.stringify(event.error) || "Unknown error event";
-                console.warn(`[Fallback] ${targetModelString} stream failed: ${errorStr}`);
+                log.warn(`[Fallback] ${targetModelString} stream failed: ${errorStr}`);
                 if (event.error) {
-                  console.warn(`[Fallback DEBUG] Error Details:`, JSON.stringify(event.error, null, 2));
+                  log.debug(`[Fallback DEBUG] Error Details:`, JSON.stringify(event.error, null, 2));
                 }
                 lastError = new Error(errorStr);
                 streamErrorBeforeEmit = true;
@@ -387,7 +397,7 @@ function createFallbackStream(
                 if (event.type === "text_delta" || event.type === "done") {
                   if (timeoutId) clearTimeout(timeoutId);
                   hasEmitted = true;
-                  console.log(`[Fallback] ${targetModelString} succeeded (streaming started)`);
+                  log.debug(`[Fallback] ${targetModelString} succeeded (streaming started)`);
                   onSuccess(chainName, targetModelString, originalIndex);
                   for (const e of eventBuffer) {
                     stream.push(e);
@@ -410,12 +420,12 @@ function createFallbackStream(
               retryCount++;
 
               if (retryCount < MAX_RETRIES_PER_MODEL) {
-                console.log(`[Fallback] Retrying ${targetModelString} in ${waitDelay}ms (attempt ${retryCount + 1}/${MAX_RETRIES_PER_MODEL})`);
+                log.debug(`[Fallback] Retrying ${targetModelString} in ${waitDelay}ms (attempt ${retryCount + 1}/${MAX_RETRIES_PER_MODEL})`);
                 await sleep(waitDelay);
                 currentDelayMs = Math.min(currentDelayMs * 2, MAX_RETRY_DELAY_MS);
                 continue;
               } else {
-                console.warn(`[Fallback] Max retries (${MAX_RETRIES_PER_MODEL}) reached for ${targetModelString}, falling back`);
+                log.warn(`[Fallback] Max retries (${MAX_RETRIES_PER_MODEL}) reached for ${targetModelString}, falling back`);
                 break; // Break retry loop to try next model
               }
             }
@@ -428,7 +438,7 @@ function createFallbackStream(
             if (!hasEmitted) {
               // Stream ended without text_delta or done (rare but possible)
               if (eventBuffer.length > 0) {
-                console.log(`[Fallback] ${targetModelString} succeeded (empty stream)`);
+                log.debug(`[Fallback] ${targetModelString} succeeded (empty stream)`);
                 onSuccess(chainName, targetModelString, originalIndex);
                 for (const e of eventBuffer) {
                   stream.push(e);
@@ -444,11 +454,11 @@ function createFallbackStream(
           } catch (error) {
             if (timeoutId) clearTimeout(timeoutId);
             const errorStr = error instanceof Error ? error.message : String(error);
-            console.error(`[Fallback DEBUG] Caught exception for ${targetModelString}:`, error);
+            log.error(`[Fallback DEBUG] Caught exception for ${targetModelString}:`, error);
             
             const { retryable, delayMs } = isRetryableError(errorStr);
 
-            console.warn(`[Fallback] ${targetModelString} connection failed: ${errorStr}`);
+            log.warn(`[Fallback] ${targetModelString} connection failed: ${errorStr}`);
             lastError = error instanceof Error ? error : new Error(errorStr);
 
             if (retryable) {
@@ -458,11 +468,11 @@ function createFallbackStream(
               retryCount++;
 
               if (retryCount < MAX_RETRIES_PER_MODEL) {
-                console.log(`[Fallback] Retrying ${targetModelString} after error in ${waitDelay}ms (attempt ${retryCount + 1}/${MAX_RETRIES_PER_MODEL})`);
+                log.debug(`[Fallback] Retrying ${targetModelString} after error in ${waitDelay}ms (attempt ${retryCount + 1}/${MAX_RETRIES_PER_MODEL})`);
                 await sleep(waitDelay);
                 currentDelayMs = Math.min(currentDelayMs * 2, MAX_RETRY_DELAY_MS);
               } else {
-                console.warn(`[Fallback] Max retries (${MAX_RETRIES_PER_MODEL}) reached for ${targetModelString}`);
+                log.warn(`[Fallback] Max retries (${MAX_RETRIES_PER_MODEL}) reached for ${targetModelString}`);
               }
             } else {
               // Non-retryable error, break out of retry loop
@@ -475,12 +485,12 @@ function createFallbackStream(
         // If we get here, either the model doesn't exist, auth failed, or we exhausted retries
         if (retryCount > 0 && retryCount >= MAX_RETRIES_PER_MODEL) {
           // We exhausted retries, continue to next model in chain
-          console.log(`[Fallback] Moving to next model after exhausting ${MAX_RETRIES_PER_MODEL} retries`);
+          log.debug(`[Fallback] Moving to next model after exhausting ${MAX_RETRIES_PER_MODEL} retries`);
         }
       }
 
       // All models failed
-      console.error(`[Fallback] All models in chain '${chainName}' failed`);
+      log.error(`[Fallback] All models in chain '${chainName}' failed`);
       stream.push({ type: "error", reason: "error", error: createErrorMessage(model, lastError || new Error("Unknown error"), chainName) });
       stream.end();
     })();
@@ -504,18 +514,20 @@ function buildProviderModels(chains: FallbackChain) {
 
 /** Extension entry point */
 export default function (pi: ExtensionAPI) {
-  console.log("[Fallback] Loading Fallback Router Extension...");
+  if (DEBUG) console.log("[Fallback] Loading Fallback Router Extension...");
 
   const chains = loadFallbackChains();
 
   if (Object.keys(chains).length === 0) {
-    console.warn("[Fallback] No fallback chains defined in ~/.pi/fallback-chains.json");
-    console.warn("[Fallback] Create with: { \"reviewer\": [\"google/gemini-3.1-pro-preview\", \"google/gemini-2.5-pro\"] }");
+    log.warn("[Fallback] No fallback chains defined in ~/.pi/fallback-chains.json");
+    log.warn("[Fallback] Create with: { \"reviewer\": [\"google/gemini-3.1-pro-preview\", \"google/gemini-2.5-pro\"] }");
     return;
   }
 
-  console.log(`[Fallback] Found chains: ${Object.keys(chains).join(", ")}`);
-  console.log(`[Fallback] Cache TTL: ${CACHE_TTL_MS / 1000 / 60}min, Failed cooldown: ${FAILED_COOLDOWN_MS / 1000}s`);
+  if (DEBUG) {
+    console.log(`[Fallback] Found chains: ${Object.keys(chains).join(", ")}`);
+    console.log(`[Fallback] Cache TTL: ${CACHE_TTL_MS / 1000 / 60}min, Failed cooldown: ${FAILED_COOLDOWN_MS / 1000}s`);
+  }
 
   const modelsConfig = buildProviderModels(chains);
 
@@ -530,7 +542,7 @@ export default function (pi: ExtensionAPI) {
       timestamp: Date.now(),
       workingIndex: index,
     });
-    console.log(`[Fallback] Cached working model: ${model} (chain: ${chainName})`);
+    log.debug(`[Fallback] Cached working model: ${model} (chain: ${chainName})`);
     
     // Clear failure record for this model
     failedModels.delete(model);
@@ -541,7 +553,7 @@ export default function (pi: ExtensionAPI) {
       failedAt: Date.now(),
       retryDelayMs: delayMs,
     });
-    console.log(`[Fallback] Recorded failure for: ${model}`);
+    log.debug(`[Fallback] Recorded failure for: ${model}`);
   };
 
   // Get model registry helper
@@ -560,6 +572,6 @@ pi.registerProvider("fallback", {
   streamSimple: createFallbackStream(chains, getModelRegistry, chainCache, failedModels, onSuccess, onFailure),
 });
 
-  console.log("[Fallback] Extension loaded successfully.");
-  console.log(`[Fallback] Available: ${Object.keys(chains).map((c) => `fallback/${c}`).join(", ")}`);
+  if (DEBUG) console.log("[Fallback] Extension loaded successfully.");
+  if (DEBUG) console.log(`[Fallback] Available: ${Object.keys(chains).map((c) => `fallback/${c}`).join(", ")}`);
 }
