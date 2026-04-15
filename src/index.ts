@@ -335,6 +335,7 @@ function createFallbackStream(
             let shouldFallback = false;
             let errorDelayMs: number | undefined;
             let hasEmitted = false;
+            let streamErrorBeforeEmit = false;
             const eventBuffer: Parameters<typeof stream.push>[0][] = [];
 
             for await (const event of sourceStream) {
@@ -345,6 +346,7 @@ function createFallbackStream(
                   console.warn(`[Fallback DEBUG] Error Details:`, JSON.stringify(event.error, null, 2));
                 }
                 lastError = new Error(errorStr);
+                streamErrorBeforeEmit = true;
                 
                 const { retryable, delayMs } = isRetryableError(errorStr);
                 if (retryable) {
@@ -392,6 +394,11 @@ function createFallbackStream(
                 console.warn(`[Fallback] Max retries (${MAX_RETRIES_PER_MODEL}) reached for ${targetModelString}, falling back`);
                 break; // Break retry loop to try next model
               }
+            }
+            
+            if (streamErrorBeforeEmit && !shouldFallback) {
+              // Non-retryable error occurred, break inner loop to try the next model
+              break;
             }
 
             if (!hasEmitted) {
