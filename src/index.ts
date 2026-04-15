@@ -242,6 +242,7 @@ function createFallbackStream(
     context: Context,
     options?: SimpleStreamOptions
   ): AssistantMessageEventStream {
+    console.error(`[Fallback DEBUG] fallbackStream invoked for model: ${model.id}`);
     const stream = createAssistantMessageEventStream();
     const chainName = model.id;
     
@@ -550,14 +551,14 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     modelRegistryRef = ctx.modelRegistry;
   });
-
-  pi.registerProvider("fallback", {
-    models: modelsConfig,
-    baseUrl: "https://fallback.local", // Placeholder
-    apiKey: process.env.FALLBACK_DUMMY_KEY || "dummy", // Placeholder
-    api: "anthropic-messages",
-    streamSimple: createFallbackStream(chains, getModelRegistry, chainCache, failedModels, onSuccess, onFailure),
-  });
+// Register the provider with pi
+pi.registerProvider("fallback", {
+  models: modelsConfig,
+  baseUrl: "https://fallback.local", // Placeholder
+  apiKey: process.env.FALLBACK_DUMMY_KEY || "dummy", // Placeholder
+  api: "fallback-router" as Api,
+  streamSimple: createFallbackStream(chains, getModelRegistry, chainCache, failedModels, onSuccess, onFailure),
+});
 
   console.log("[Fallback] Extension loaded successfully.");
   console.log(`[Fallback] Available: ${Object.keys(chains).map((c) => `fallback/${c}`).join(", ")}`);
