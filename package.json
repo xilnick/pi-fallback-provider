@@ -1,6 +1,6 @@
 {
   "name": "pi-fallback-provider",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "Model fallback chain extension for pi — automatic retry and failover across AI providers",
   "type": "module",
   "main": "dist/index.js",
@@ -30,12 +30,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/xilnick/pi-fallback-router"
+    "url": "https://github.com/xilnick/pi-fallback-provider"
   },
   "bugs": {
-    "url": "https://github.com/xilnick/pi-fallback-router/issues"
+    "url": "https://github.com/xilnick/pi-fallback-provider/issues"
   },
-  "homepage": "https://github.com/xilnick/pi-fallback-router#readme",
+  "homepage": "https://github.com/xilnick/pi-fallback-provider#readme",
   "pi": {
     "extensions": ["./dist"]
   },
