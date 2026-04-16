@@ -20,21 +20,25 @@
   "keywords": [
     "pi-extension",
     "pi-package",
-    "fallback",
-    "failover",
+    "pi",
     "model-routing",
     "high-availability",
-    "ai-provider"
+    "failover",
+    "retry",
+    "exponential-backoff"
   ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "https://github.com/xilnick/pi-fallback-router"
   },
   "bugs": {
-    "url": ""
+    "url": "https://github.com/xilnick/pi-fallback-router/issues"
   },
-  "homepage": "",
+  "homepage": "https://github.com/xilnick/pi-fallback-router#readme",
+  "pi": {
+    "extensions": ["./dist"]
+  },
   "devDependencies": {
     "@mariozechner/pi-ai": "^0.66.1",
     "@types/node": "^25.6.0",
